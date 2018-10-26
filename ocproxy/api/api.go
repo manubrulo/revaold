@@ -3921,79 +3921,125 @@ func (p *proxy) search(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	searchTarget := p.getSearchTarget(search)
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr}
-	url := fmt.Sprintf("%s/api/v1/search/%s", p.cboxGroupDaemonURI, search)
-	p.logger.Info("jeje", zap.String("uri", p.cboxGroupDaemonURI), zap.String("url", url))
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		p.logger.Error("", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.cboxGroupDaemonSecret))
-	res, err := client.Do(req)
-	if err != nil {
-		p.logger.Error("", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	if res.StatusCode != http.StatusOK {
-		p.logger.Error("error calling cboxgroupd search", zap.Int("status", res.StatusCode))
-		w.WriteHeader(res.StatusCode)
-		return
-
-	}
-
-	searchEntries := []*searchEntry{}
-	body, err := ioutil.ReadAll(res.Body)
-	defer res.Body.Close()
-	if err != nil {
-		p.logger.Error("", zap.Error(err))
-		w.WriteHeader(res.StatusCode)
-		return
-	}
-
-	err = json.Unmarshal(body, &searchEntries)
-	if err != nil {
-		p.logger.Error("", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
 
 	exactUserEntries := []*OCSShareeEntry{}
 	inexactUserEntries := []*OCSShareeEntry{}
 	exactGroupEntries := []*OCSShareeEntry{}
 	inexactGroupEntries := []*OCSShareeEntry{}
-	for _, se := range searchEntries {
-		shareType := p.getShareType(se.AccountType)
-		ocsEntry := &OCSShareeEntry{
-			Value: &OCSShareeEntryValue{ShareType: p.getShareType(se.AccountType), ShareWith: se.CN},
-		}
 
-		if shareType == ShareTypeUser {
-			ocsEntry.Label = fmt.Sprintf("%s (%s)", se.DisplayName, se.CN)
-			if se.CN == searchTarget {
-				exactUserEntries = append(exactUserEntries, ocsEntry)
-			} else {
-				inexactUserEntries = append(inexactUserEntries, ocsEntry)
+	if strings.Contains(search, "@") {
+		ctx := r.Context()
+		gCtx := GetContextWithAuth(ctx)
+
+		searchCompontents := strings.Split(search, "@")
+		searchUser := searchCompontents[0]
+		searchDomain := searchCompontents[1]
+
+		stream, err := p.getShareClient().ListProviders(gCtx, &reva_api.EmptyReq{})
+
+		if err == nil {
+			for {
+				res, err := stream.Recv()
+				if err == io.EOF {
+					break
+				}
+
+				if err == nil && res.Status == reva_api.StatusCode_OK {
+					provider := res.Provider.Domain
+
+					if strings.HasPrefix(provider, searchDomain) {
+
+						shareWith := fmt.Sprintf("%s@%s", searchUser, provider)
+
+						ocsEntry := &OCSShareeEntry{
+							Value: &OCSShareeEntryValue{ShareType: ShareTypeOCM, ShareWith: shareWith},
+						}
+						ocsEntry.Label = fmt.Sprintf("%s (external)", shareWith)
+
+						if provider == searchDomain {
+							exactUserEntries = append(exactUserEntries, ocsEntry)
+						} else {
+							inexactUserEntries = append(inexactUserEntries, ocsEntry)
+						}
+					}
+
+				}
 			}
 
-		} else { // asumme group
-			ocsEntry.Label = se.CN // owncloud will append (group) at the end
-			if se.CN == searchTarget {
-				exactGroupEntries = append(exactGroupEntries, ocsEntry)
-			} else {
-				inexactGroupEntries = append(inexactGroupEntries, ocsEntry)
-			}
+		}
+
+	} else {
+
+		searchTarget := p.getSearchTarget(search)
+
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		client := &http.Client{Transport: tr}
+		url := fmt.Sprintf("%s/api/v1/search/%s", p.cboxGroupDaemonURI, search)
+		p.logger.Info("jeje", zap.String("uri", p.cboxGroupDaemonURI), zap.String("url", url))
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.cboxGroupDaemonSecret))
+		res, err := client.Do(req)
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if res.StatusCode != http.StatusOK {
+			p.logger.Error("error calling cboxgroupd search", zap.Int("status", res.StatusCode))
+			w.WriteHeader(res.StatusCode)
+			return
 
 		}
 
+		searchEntries := []*searchEntry{}
+		body, err := ioutil.ReadAll(res.Body)
+		defer res.Body.Close()
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(res.StatusCode)
+			return
+		}
+
+		err = json.Unmarshal(body, &searchEntries)
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		for _, se := range searchEntries {
+			shareType := p.getShareType(se.AccountType)
+			ocsEntry := &OCSShareeEntry{
+				Value: &OCSShareeEntryValue{ShareType: p.getShareType(se.AccountType), ShareWith: se.CN},
+			}
+
+			if shareType == ShareTypeUser {
+				ocsEntry.Label = fmt.Sprintf("%s (%s)", se.DisplayName, se.CN)
+				if se.CN == searchTarget {
+					exactUserEntries = append(exactUserEntries, ocsEntry)
+				} else {
+					inexactUserEntries = append(inexactUserEntries, ocsEntry)
+				}
+
+			} else { // asumme group
+				ocsEntry.Label = se.CN // owncloud will append (group) at the end
+				if se.CN == searchTarget {
+					exactGroupEntries = append(exactGroupEntries, ocsEntry)
+				} else {
+					inexactGroupEntries = append(inexactGroupEntries, ocsEntry)
+				}
+
+			}
+
+		}
 	}
 
 	exact := &OCSShareeExact{Users: exactUserEntries, Groups: exactGroupEntries, Remotes: []*OCSShareeEntry{}}
@@ -4111,6 +4157,47 @@ func (p *proxy) createFolderShare(ctx context.Context, newShare *NewShareOCSRequ
 	w.Write(encoded)
 
 }
+
+func (p *proxy) createOCMShare(ctx context.Context, newShare *NewShareOCSRequest, w http.ResponseWriter, r *http.Request) {
+	gCtx := GetContextWithAuth(ctx)
+	newOCMReq := &reva_api.NewOCMReq{
+		Path:      newShare.Path,
+		Recipient: newShare.ShareWith,
+	}
+	ocmRes, err := p.getShareClient().AddOCMShare(gCtx, newOCMReq)
+	if err != nil {
+		p.logger.Error("", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if ocmRes.Status != reva_api.StatusCode_OK {
+		p.writeError(ocmRes.Status, w, r)
+		return
+	}
+
+	ocmShare := ocmRes.OcmShare
+	ocsShare, err := p.ocmToOCSShare(ctx, ocmShare)
+	if err != nil {
+		p.logger.Error("", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	meta := &ResponseMeta{Status: "ok", StatusCode: 200}
+	payload := &OCSPayload{Meta: meta, Data: ocsShare}
+	ocsRes := &OCSResponse{OCS: payload}
+	encoded, err := json.Marshal(ocsRes)
+	if err != nil {
+		p.logger.Error("", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(encoded)
+
+}
+
 func (p *proxy) createShare(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	newShare := &NewShareOCSRequest{}
@@ -4129,8 +4216,15 @@ func (p *proxy) createShare(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-	} else { // assume x-www-form-urlencoded
-		err := r.ParseForm()
+	} else {
+
+		var err error
+		if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+			err = r.ParseMultipartForm(0)
+		} else { // assume x-www-form-urlencoded
+			err = r.ParseForm()
+		}
+
 		if err != nil {
 			p.logger.Error("", zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
@@ -4148,6 +4242,8 @@ func (p *proxy) createShare(w http.ResponseWriter, r *http.Request) {
 			shareType = ShareTypeGroup
 		} else if shareTypeString == "3" {
 			shareType = ShareTypePublicLink
+		} else if shareTypeString == "4" {
+			shareType = ShareTypeOCM
 		}
 		newShare.ShareType = shareType
 
@@ -4244,6 +4340,9 @@ func (p *proxy) createShare(w http.ResponseWriter, r *http.Request) {
 	} else if newShare.ShareType == ShareTypeUser || newShare.ShareType == ShareTypeGroup {
 		p.createFolderShare(ctx, newShare, readOnly, w, r)
 		return
+	} else if newShare.ShareType == ShareTypeOCM {
+		p.createOCMShare(ctx, newShare, w, r)
+		return
 	} else {
 		w.WriteHeader(http.StatusNotImplemented)
 		return
@@ -4302,6 +4401,15 @@ func (p *proxy) getShares(w http.ResponseWriter, r *http.Request) {
 
 		}
 		ocsShares = folderShares
+
+		ocmshares, err := p.getOCMShares(ctx)
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+
+		}
+		ocsShares = append(ocsShares, ocmshares...)
 	} else {
 		publicLinks, err := p.getPublicLinkShares(ctx, path)
 		if err != nil {
@@ -4316,10 +4424,17 @@ func (p *proxy) getShares(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("", zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
+		}
+		ocsShares = append(ocsShares, folderShares...)
+
+		ocmshares, err := p.getOCMShares(ctx)
+		if err != nil {
+			p.logger.Error("", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 
 		}
-
-		ocsShares = append(ocsShares, folderShares...)
+		ocsShares = append(ocsShares, ocmshares...)
 	}
 
 	meta := &ResponseMeta{Status: "ok", StatusCode: 100}
@@ -4424,6 +4539,43 @@ func (p *proxy) getReceivedFolderShares(ctx context.Context) ([]*OCSShare, error
 	}
 	return ocsShares, nil
 
+}
+
+func (p *proxy) getOCMShares(ctx context.Context) ([]*OCSShare, error) {
+	gCtx := GetContextWithAuth(ctx)
+	stream, err := p.getShareClient().ListOCMShares(gCtx, &reva_api.ListOCMSharesReq{})
+	if err != nil {
+		return nil, err
+	}
+
+	ocmShares := []*reva_api.OCMShare{}
+	for {
+		res, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if res.Status != reva_api.StatusCode_OK {
+			return nil, err
+		}
+		ocmShares = append(ocmShares, res.OcmShare)
+
+	}
+
+	ocsShares := []*OCSShare{}
+	for _, share := range ocmShares {
+		ocsShare, err := p.ocmToOCSShare(ctx, share)
+		if err != nil {
+			p.logger.Warn("cannot convert ocm share to ocs share", zap.Error(err), zap.String("folder share", fmt.Sprintf("%+v", share)))
+			continue
+		}
+		ocsShares = append(ocsShares, ocsShare)
+	}
+	return ocsShares, nil
 }
 
 func (p *proxy) getFolderShares(ctx context.Context, onlyForPath string) ([]*OCSShare, error) {
@@ -4563,6 +4715,48 @@ func (p *proxy) folderShareToOCSShare(ctx context.Context, share *reva_api.Folde
 		ShareWithDisplayName: shareWith,
 	}
 	//p.logger.Debug("reva folder share to oc share", zap.String("folder_share", fmt.Sprintf("%+v", share)), zap.String("ocs_share", fmt.Sprintf("%+v", ocsShare)))
+	return ocsShare, nil
+}
+func (p *proxy) ocmToOCSShare(ctx context.Context, share *reva_api.OCMShare) (*OCSShare, error) {
+	// TODO(labkode): harden check
+	user, _ := reva_api.ContextGetUser(ctx)
+	owner := user.AccountId
+
+	md, err := p.getCachedMetadata(ctx, share.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	var itemType ItemType = ItemTypeFolder
+
+	var mimeType = "httpd/unix-directory"
+	var permissions Permission
+	if share.ReadOnly {
+		permissions = PermissionRead
+	} else {
+		permissions = PermissionReadWrite
+	}
+
+	ocsShare := &OCSShare{
+		ShareType:            ShareTypeOCM,
+		ID:                   share.Id,
+		DisplayNameFileOwner: owner,
+		DisplayNameOwner:     owner,
+		FileSource:           md.Id,
+		FileTarget:           md.Path,
+		ItemSource:           md.Id,
+		ItemType:             itemType,
+		MimeType:             mimeType,
+		Name:                 md.Path,
+		Path:                 p.joinCBOXMappedPath(ctx, md.Path),
+		Permissions:          permissions,
+		ShareTime:            int(share.Mtime),
+		State:                ShareStateAccepted,
+		UIDFileOwner:         owner,
+		UIDOwner:             owner,
+		ShareWith:            &share.Recipient,
+		ShareWithDisplayName: share.Recipient,
+	}
 	return ocsShare, nil
 }
 func (p *proxy) publicLinkToOCSShare(ctx context.Context, pl *reva_api.PublicLink) (*OCSShare, error) {
@@ -5106,6 +5300,8 @@ func (p *proxy) updateShare(w http.ResponseWriter, r *http.Request) {
 			shareType = ShareTypeGroup
 		} else if shareTypeString == "3" {
 			shareType = ShareTypePublicLink
+		} else if shareTypeString == "4" {
+			shareType = ShareTypeOCM
 		}
 		newShare.ShareType = shareType
 
@@ -5267,6 +5463,7 @@ const (
 	ShareTypeUser       ShareType = 0
 	ShareTypeGroup                = 1
 	ShareTypePublicLink           = 3
+	ShareTypeOCM                  = 4
 
 	PermissionRead      Permission = 1
 	PermissionReadWrite Permission = 15
@@ -7527,13 +7724,21 @@ func (p *proxy) getOCPath(ctx context.Context, md *reva_api.Metadata) string {
 		vals := strings.Split(ocPath, "/")
 		ocPath = path.Join(p.ownCloudPublicLinkPrefix, path.Join(vals[1:]...))
 	} else {
+
 		if strings.HasPrefix(revaPath, p.revaSharePrefix) {
 			ocPath = strings.TrimPrefix(revaPath, p.revaSharePrefix)
 			ocPath = strings.TrimPrefix(ocPath, "/")
 			tokens := strings.Split(ocPath, "/")
 			tokens[0] = p.addShareTarget(ctx, tokens[0], md)
+
+			if md.IsOcm && len(tokens) > 2 {
+				//to remove .../ocm/folder_name/...
+				tokens = append(tokens[0:1], tokens[3:]...)
+			}
+
 			ocPath = path.Join("/", path.Join(tokens...))
 			ocPath = path.Join(p.ownCloudSharePrefix, ocPath)
+
 		} else {
 			if strings.HasPrefix(revaPath, p.revaHomePrefix) {
 				ocPath = strings.TrimPrefix(revaPath, p.revaHomePrefix)
