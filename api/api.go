@@ -187,6 +187,7 @@ type UserManager interface {
 }
 type AuthManager interface {
 	Authenticate(ctx context.Context, clientID, clientPassword string) (*User, error)
+	AuthenticateToken(ctx context.Context, token string) (*User, error)
 }
 
 type TokenManager interface {
